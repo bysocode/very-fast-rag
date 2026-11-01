@@ -1,20 +1,21 @@
-
-import numpy as np
 import pathlib
-import ollama
-import ray
 import time
 
-EMBEDDING_MODEL = "hf.co/CompendiumLabs/bge-base-en-v1.5-gguf"
-LANGUAGE_MODEL = "hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF"
+import numpy as np
+import ollama
+import ray
 
-VECTOR_DB = []
+# Modèles identiques dans main.py et main_ray.py pour une comparaison juste
+DATASET_PATH = "HarryPotter.txt"
+EMBEDDING_MODEL = "embeddinggemma:300m"
+LANGUAGE_MODEL = "gemma3:270m"
+TOP_N = 3
 
 
 # -------------------------
 # 1. Initialisation
 # -------------------------
-start = time.start()
+
 def create_dataset(filepath):
     path = pathlib.Path(filepath)
 
@@ -91,7 +92,7 @@ def build_vector_db(chunks):
 # 4. Retrieval avec Ray
 # -------------------------
 
-def retrieve(query, vector_db, top_n=3):
+def retrieve(query, vector_db, top_n=TOP_N):
 
     # Embedding de la requête
     query_embedding = ray.get(
@@ -119,40 +120,66 @@ def retrieve(query, vector_db, top_n=3):
 # 5. Application principale
 # -------------------------
 
-def main():
+def main(ray_init_time=0.0):
 
-    # Chargement du dataset
-    dataset = create_dataset("data.txt")
+    # -------------------------
+    # 6. Load dataset
+    # -------------------------
+
+    t0 = time.perf_counter()
+    dataset = create_dataset(DATASET_PATH)
+    t1 = time.perf_counter()
+
+    # -------------------------
+    # 7. Split dataset into chunks
+    # -------------------------
 
     chunks = [
         line.strip()
         for line in dataset.splitlines()
         if line.strip()
     ]
+    t2 = time.perf_counter()
 
-    # Construction de la base vectorielle
+    # -------------------------
+    # 8. Generate embeddings with Ray
+    # -------------------------
+
     print("Generating embeddings with Ray...")
 
     vector_db = build_vector_db(chunks)
 
+    t3 = time.perf_counter()
+
     print(f"Vector database created: {len(vector_db)} chunks")
 
-    # Question utilisateur
+    # -------------------------
+    # 9. User query
+    # -------------------------
+
     input_query = input("\nAsk me a question: ")
 
-    # Recherche des chunks pertinents
+    # -------------------------
+    # 10. Retrieve relevant chunks
+    # -------------------------
+
+    t_retrieval_start = time.perf_counter()
     retrieved_knowledge = retrieve(
         input_query,
         vector_db,
-        top_n=3
+        top_n=TOP_N
     )
+    t4 = time.perf_counter()
 
     print("\nRetrieved knowledge:")
 
     for chunk, similarity in retrieved_knowledge:
         print(f" - (similarity: {similarity:.2f}) {chunk}")
 
-    # Construction du contexte
+    # -------------------------
+    # 11. Build prompt
+    # -------------------------
+
     context = "\n".join(
         [f" - {chunk}" for chunk, similarity in retrieved_knowledge]
     )
@@ -165,7 +192,10 @@ Context:
 {context}
 """
 
-    # Génération de la réponse avec Ollama
+    # -------------------------
+    # 12. Generate response
+    # -------------------------
+
     stream = ollama.chat(
         model=LANGUAGE_MODEL,
         messages=[
@@ -184,20 +214,39 @@ Context:
             flush=True
         )
 
+    t5 = time.perf_counter()
+
+    # -------------------------
+    # 13. Execution time (hors temps de saisie)
+    # -------------------------
+
+    retrieval_time = t4 - t_retrieval_start
+    total_time = (
+        ray_init_time
+        + (t1 - t0)
+        + (t2 - t1)
+        + (t3 - t2)
+        + retrieval_time
+        + (t5 - t4)
+    )
+
+    print("\n\n========== EXECUTION (RAY) ==========")
+    print(f"Ray init:              {ray_init_time:.2f}s")
+    print(f"Dataset loading:       {t1 - t0:.2f}s")
+    print(f"Chunking:              {t2 - t1:.2f}s")
+    print(f"Embedding generation:  {t3 - t2:.2f}s")
+    print(f"Retrieval:             {retrieval_time:.2f}s")
+    print(f"LLM generation:        {t5 - t4:.2f}s")
+    print("--------------------------------------")
+    print(f"Total (hors saisie):   {total_time:.2f}s")
 
 
 if __name__ == "__main__":
-
+    ray_start = time.perf_counter()
     ray.init()
-
-    start = time.perf_counter()
+    ray_init_time = time.perf_counter() - ray_start
 
     try:
-        main()
-
+        main(ray_init_time)
     finally:
-        end = time.perf_counter()
         ray.shutdown()
-
-        print(f"\nExécuté en {end - start:.2f} secondes")
-

@@ -1,11 +1,14 @@
-
-import numpy as np
 import pathlib
-import ollama
 import time
 
-EMBEDDING_MODEL = 'hf.co/CompendiumLabs/bge-base-en-v1.5-gguf'
-LANGUAGE_MODEL = 'hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF'
+import numpy as np
+import ollama
+
+# Modèles identiques dans main.py et main_ray.py pour une comparaison juste
+DATASET_PATH = "HarryPotter.txt"
+EMBEDDING_MODEL = "embeddinggemma:300m"
+LANGUAGE_MODEL = "gemma3:270m"
+TOP_N = 3
 
 VECTOR_DB = []
 
@@ -13,9 +16,6 @@ VECTOR_DB = []
 # -------------------------
 # 1. Initialisation
 # -------------------------
-
-start = time.perf_counter()
-
 
 def cosine_similarity(a, b):
     dot_product = np.dot(a, b)
@@ -25,7 +25,7 @@ def cosine_similarity(a, b):
     if norm_a == 0 or norm_b == 0:
         return 0.0
 
-    return dot_product / (norm_a * norm_b)
+    return float(dot_product / (norm_a * norm_b))
 
 
 def create_dataset(filepath):
@@ -34,34 +34,29 @@ def create_dataset(filepath):
     if not path.is_file():
         raise FileNotFoundError(f"File not found: {filepath}")
 
-    with open(path, 'r', encoding='utf-8') as f:
-        dataset = f.read()
-
-    return dataset
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
 
 
 def add_chunk_to_database(chunk):
     embedding = ollama.embed(
         model=EMBEDDING_MODEL,
         input=chunk
-    )['embeddings'][0]
+    )["embeddings"][0]
 
     VECTOR_DB.append((chunk, embedding))
 
 
-def retrieve(query, top_n=3):
+def retrieve(query, top_n=TOP_N):
     query_embedding = ollama.embed(
         model=EMBEDDING_MODEL,
         input=query
-    )['embeddings'][0]
+    )["embeddings"][0]
 
     similarities = []
 
     for chunk, embedding in VECTOR_DB:
-        similarity = cosine_similarity(
-            query_embedding,
-            embedding
-        )
+        similarity = cosine_similarity(query_embedding, embedding)
         similarities.append((chunk, similarity))
 
     similarities.sort(key=lambda x: x[1], reverse=True)
@@ -69,74 +64,67 @@ def retrieve(query, top_n=3):
     return similarities[:top_n]
 
 
-# -------------------------
-# 2. Load dataset
-# -------------------------
+def main():
+    # -------------------------
+    # 2. Load dataset
+    # -------------------------
 
-t0 = time.perf_counter()
+    t0 = time.perf_counter()
+    dataset = create_dataset(DATASET_PATH)
+    t1 = time.perf_counter()
 
-dataset = create_dataset("data.txt")
+    # -------------------------
+    # 3. Split dataset into chunks
+    # -------------------------
 
-t1 = time.perf_counter()
+    chunks = [
+        line.strip()
+        for line in dataset.splitlines()
+        if line.strip()
+    ]
+    t2 = time.perf_counter()
 
+    # -------------------------
+    # 4. Generate embeddings
+    # -------------------------
 
-# -------------------------
-# 3. Split dataset into chunks
-# -------------------------
+    print("Generating embeddings sequentially...")
 
-chunks = [
-    line.strip()
-    for line in dataset.splitlines()
-    if line.strip()
-]
+    for chunk in chunks:
+        add_chunk_to_database(chunk)
 
-t2 = time.perf_counter()
+    t3 = time.perf_counter()
 
+    print(f"Vector database created: {len(VECTOR_DB)} chunks")
 
-# -------------------------
-# 4. Generate embeddings
-# -------------------------
+    # -------------------------
+    # 5. User query
+    # -------------------------
 
-print("Generating embeddings...")
+    input_query = input("\nAsk me a question: ")
 
-for chunk in chunks:
-    add_chunk_to_database(chunk)
+    # -------------------------
+    # 6. Retrieve relevant chunks
+    # -------------------------
 
-t3 = time.perf_counter()
+    t_retrieval_start = time.perf_counter()
+    retrieved_knowledge = retrieve(input_query)
+    t4 = time.perf_counter()
 
-print(f"Vector database created: {len(VECTOR_DB)} chunks")
+    print("\nRetrieved knowledge:")
 
+    for chunk, similarity in retrieved_knowledge:
+        print(f" - (similarity: {similarity:.2f}) {chunk}")
 
-# -------------------------
-# 5. User query
-# -------------------------
+    # -------------------------
+    # 7. Build prompt
+    # -------------------------
 
-input_query = input("\nAsk me a question: ")
+    context = "\n".join(
+        [f" - {chunk}" for chunk, similarity in retrieved_knowledge]
+    )
 
-
-# -------------------------
-# 6. Retrieve relevant chunks
-# -------------------------
-
-retrieved_knowledge = retrieve(input_query)
-
-t4 = time.perf_counter()
-
-print("\nRetrieved knowledge:")
-
-for chunk, similarity in retrieved_knowledge:
-    print(f" - (similarity: {similarity:.2f}) {chunk}")
-
-
-# -------------------------
-# 7. Build prompt
-# -------------------------
-
-context = "\n".join(
-    [f" - {chunk}" for chunk, similarity in retrieved_knowledge]
-)
-
-instruction_prompt = f"""You are a helpful chatbot.
+    instruction_prompt = f"""You are a helpful chatbot.
 Use only the following pieces of context to answer the question.
 If the answer is not present, say that you don't know.
 
@@ -144,43 +132,48 @@ Context:
 {context}
 """
 
+    # -------------------------
+    # 8. Generate response
+    # -------------------------
 
-# -------------------------
-# 8. Generate response
-# -------------------------
-
-stream = ollama.chat(
-    model=LANGUAGE_MODEL,
-    messages=[
-        {'role': 'system', 'content': instruction_prompt},
-        {'role': 'user', 'content': input_query},
-    ],
-    stream=True,
-)
-
-print("\nChatbot response:")
-
-for chunk in stream:
-    print(
-        chunk['message']['content'],
-        end='',
-        flush=True
+    stream = ollama.chat(
+        model=LANGUAGE_MODEL,
+        messages=[
+            {"role": "system", "content": instruction_prompt},
+            {"role": "user", "content": input_query},
+        ],
+        stream=True,
     )
 
-t5 = time.perf_counter()
+    print("\nChatbot response:")
+
+    for chunk in stream:
+        print(chunk["message"]["content"], end="", flush=True)
+
+    t5 = time.perf_counter()
+
+    # -------------------------
+    # 9. Execution time (hors temps de saisie)
+    # -------------------------
+
+    retrieval_time = t4 - t_retrieval_start
+    total_time = (
+        (t1 - t0)
+        + (t2 - t1)
+        + (t3 - t2)
+        + retrieval_time
+        + (t5 - t4)
+    )
+
+    print("\n\n========== EXECUTION (SÉQUENTIEL) ==========")
+    print(f"Dataset loading:       {t1 - t0:.2f}s")
+    print(f"Chunking:              {t2 - t1:.2f}s")
+    print(f"Embedding generation:  {t3 - t2:.2f}s")
+    print(f"Retrieval:             {retrieval_time:.2f}s")
+    print(f"LLM generation:        {t5 - t4:.2f}s")
+    print("---------------------------------------------")
+    print(f"Total (hors saisie):   {total_time:.2f}s")
 
 
-# -------------------------
-# 9. Execution time
-# -------------------------
-
-print("\n\n========== EXECUTION ==========")
-
-print(f"Dataset loading:       {t1 - t0:.2f}s")
-print(f"Chunking:              {t2 - t1:.2f}s")
-print(f"Embedding generation:  {t3 - t2:.2f}s")
-print(f"Retrieval:             {t4 - t3:.2f}s")
-print(f"LLM generation:        {t5 - t4:.2f}s")
-
-print("------------------------------------")
-print(f"Total execution time:  {t5 - t0:.2f}s")
+if __name__ == "__main__":
+    main()
