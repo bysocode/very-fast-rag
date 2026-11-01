@@ -1,3 +1,4 @@
+import os
 import pathlib
 import time
 
@@ -10,23 +11,18 @@ EMBEDDING_MODEL = "embeddinggemma:300m"
 LANGUAGE_MODEL = "gemma3:270m"
 TOP_N = 3
 
+# Un appel Ollama pour plusieurs chunks : moins d'overhead HTTP
+EMBED_BATCH_SIZE = 32
+
+# Permet un test rapide : MAX_CHUNKS=512 uv run main.py
+MAX_CHUNKS = int(os.getenv("MAX_CHUNKS", "0"))  # 0 = tout le dataset
+
 VECTOR_DB = []
 
 
 # -------------------------
 # 1. Initialisation
 # -------------------------
-
-def cosine_similarity(a, b):
-    dot_product = np.dot(a, b)
-    norm_a = np.linalg.norm(a)
-    norm_b = np.linalg.norm(b)
-
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-
-    return float(dot_product / (norm_a * norm_b))
-
 
 def create_dataset(filepath):
     path = pathlib.Path(filepath)
@@ -38,35 +34,74 @@ def create_dataset(filepath):
         return f.read()
 
 
-def add_chunk_to_database(chunk):
-    embedding = ollama.embed(
-        model=EMBEDDING_MODEL,
-        input=chunk
-    )["embeddings"][0]
+def warmup():
+    """Charge les modèles en mémoire pour ne pas les compter dans les timings."""
+    print("Warming up models...")
 
-    VECTOR_DB.append((chunk, embedding))
+    ollama.embed(model=EMBEDDING_MODEL, input=["warmup"])
+
+    ollama.chat(
+        model=LANGUAGE_MODEL,
+        messages=[{"role": "user", "content": "Say OK"}],
+        options={"num_predict": 1},
+        stream=False,
+    )
+
+
+def add_chunks_to_database(chunks):
+    for start in range(0, len(chunks), EMBED_BATCH_SIZE):
+        batch = chunks[start:start + EMBED_BATCH_SIZE]
+
+        embeddings = ollama.embed(
+            model=EMBEDDING_MODEL,
+            input=batch
+        )["embeddings"]
+
+        VECTOR_DB.extend(zip(batch, embeddings))
 
 
 def retrieve(query, top_n=TOP_N):
-    query_embedding = ollama.embed(
-        model=EMBEDDING_MODEL,
-        input=query
-    )["embeddings"][0]
+    query_embedding = np.asarray(
+        ollama.embed(
+            model=EMBEDDING_MODEL,
+            input=query
+        )["embeddings"][0],
+        dtype=np.float32,
+    )
 
-    similarities = []
+    matrix = np.asarray(
+        [embedding for _, embedding in VECTOR_DB],
+        dtype=np.float32,
+    )
 
-    for chunk, embedding in VECTOR_DB:
-        similarity = cosine_similarity(query_embedding, embedding)
-        similarities.append((chunk, similarity))
+    norms = np.linalg.norm(matrix, axis=1)
+    query_norm = np.linalg.norm(query_embedding)
+    denominator = norms * query_norm
 
-    similarities.sort(key=lambda x: x[1], reverse=True)
+    similarities = np.divide(
+        matrix @ query_embedding,
+        denominator,
+        out=np.zeros_like(norms),
+        where=denominator != 0,
+    )
 
-    return similarities[:top_n]
+    indices = np.argsort(similarities)[-top_n:][::-1]
+
+    return [
+        (VECTOR_DB[i][0], float(similarities[i]))
+        for i in indices
+    ]
 
 
 def main():
     # -------------------------
-    # 2. Load dataset
+    # 2. Warm-up (hors timings)
+    # -------------------------
+
+    warmup()
+
+    # -------------------------
+    # 3. Load dataset
     # -------------------------
 
     t0 = time.perf_counter()
@@ -74,7 +109,7 @@ def main():
     t1 = time.perf_counter()
 
     # -------------------------
-    # 3. Split dataset into chunks
+    # 4. Split dataset into chunks
     # -------------------------
 
     chunks = [
@@ -82,29 +117,32 @@ def main():
         for line in dataset.splitlines()
         if line.strip()
     ]
+
+    if MAX_CHUNKS:
+        chunks = chunks[:MAX_CHUNKS]
+
     t2 = time.perf_counter()
 
     # -------------------------
-    # 4. Generate embeddings
+    # 5. Generate embeddings
     # -------------------------
 
-    print("Generating embeddings sequentially...")
+    print(f"Generating embeddings sequentially (batches of {EMBED_BATCH_SIZE})...")
 
-    for chunk in chunks:
-        add_chunk_to_database(chunk)
+    add_chunks_to_database(chunks)
 
     t3 = time.perf_counter()
 
     print(f"Vector database created: {len(VECTOR_DB)} chunks")
 
     # -------------------------
-    # 5. User query
+    # 6. User query
     # -------------------------
 
     input_query = input("\nAsk me a question: ")
 
     # -------------------------
-    # 6. Retrieve relevant chunks
+    # 7. Retrieve relevant chunks
     # -------------------------
 
     t_retrieval_start = time.perf_counter()
@@ -117,7 +155,7 @@ def main():
         print(f" - (similarity: {similarity:.2f}) {chunk}")
 
     # -------------------------
-    # 7. Build prompt
+    # 8. Build prompt
     # -------------------------
 
     context = "\n".join(
@@ -133,7 +171,7 @@ Context:
 """
 
     # -------------------------
-    # 8. Generate response
+    # 9. Generate response
     # -------------------------
 
     stream = ollama.chat(
@@ -153,7 +191,7 @@ Context:
     t5 = time.perf_counter()
 
     # -------------------------
-    # 9. Execution time (hors temps de saisie)
+    # 10. Execution time (hors saisie et warm-up)
     # -------------------------
 
     retrieval_time = t4 - t_retrieval_start

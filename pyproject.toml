@@ -1,0 +1,22 @@
+[project]
+name = "very-fast-rag"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Jaymar", email = "philemyjulienaymar@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "numpy>=2.5.4",
+    "ollama>=0.6.3",
+    "pathlib>=1.0.1",
+    "ray>=2.59.0",
+]
+
+[project.scripts]
+very-fast-rag = "very_fast_rag:main"
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
